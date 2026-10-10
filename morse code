@@ -1,0 +1,318 @@
+# Task 6 – Flashing Morse Code using ESP32
+
+## Connections
+
+| ESP32 DevKit V1 | Component |
+|---|---|
+| GPIO 4 | Connect to one end of the 220Ω resistor |
+| Other end of resistor | LED long leg (Anode +) |
+| LED short leg (Cathode −) | GND |
+| USB port | Connect ESP32 to laptop |
+
+Components used: ESP32 DevKit V1, one external LED, 220Ω resistor, breadboard, jumper wires and USB cable.
+
+## Full Source Code
+
+Save the following code as `Task6_MorseCode.ino` and open it in Arduino IDE.
+
+```cpp
+#include <WiFi.h>
+#include <WebServer.h>
+
+// Wi-Fi credentials
+const char* ssid = "YOUR_WIFI_NAME";
+const char* password = "YOUR_WIFI_PASSWORD";
+
+// LED connection
+const int LED_PIN = 4;
+
+// Web server on HTTP port 80
+WebServer server(80);
+
+// Morse timing in milliseconds
+const unsigned int DOT_TIME = 250;
+const unsigned int DASH_TIME = 750;
+const unsigned int SYMBOL_GAP = 250;
+const unsigned int LETTER_GAP = 750;
+const unsigned int WORD_GAP = 1750;
+
+// Morse codes for A-Z
+const char* letters[26] = {
+  ".-", "-...", "-.-.", "-..", ".", "..-.", "--.",
+  "....", "..", ".---", "-.-", ".-..", "--", "-.",
+  "---", ".--.", "--.-", ".-.", "...", "-", "..-",
+  "...-", ".--", "-..-", "-.--", "--.."
+};
+
+// Morse codes for digits 0-9
+const char* numbers[10] = {
+  "-----", ".----", "..---", "...--", "....-",
+  ".....", "-....", "--...", "---..", "----."
+};
+
+// Convert normal text into Morse code
+String convertToMorse(String text) {
+  String morse = "";
+  text.toUpperCase();
+
+  for (int i = 0; i < text.length(); i++) {
+    char c = text[i];
+
+    if (c >= 'A' && c <= 'Z') {
+      if (morse.length() > 0 &&
+          morse[morse.length() - 1] != '/') {
+        morse += " ";
+      }
+      morse += letters[c - 'A'];
+    }
+    else if (c >= '0' && c <= '9') {
+      if (morse.length() > 0 &&
+          morse[morse.length() - 1] != '/') {
+        morse += " ";
+      }
+      morse += numbers[c - '0'];
+    }
+    else if (c == ' ') {
+      if (morse.length() > 0 &&
+          morse[morse.length() - 1] != '/') {
+        morse += " /";
+      }
+    }
+  }
+
+  return morse;
+}
+
+// Flash a Morse dot
+void dot() {
+  digitalWrite(LED_PIN, HIGH);
+  delay(DOT_TIME);
+  digitalWrite(LED_PIN, LOW);
+  delay(SYMBOL_GAP);
+}
+
+// Flash a Morse dash
+void dash() {
+  digitalWrite(LED_PIN, HIGH);
+  delay(DASH_TIME);
+  digitalWrite(LED_PIN, LOW);
+  delay(SYMBOL_GAP);
+}
+
+// Flash the complete Morse message
+void flashMorse(const String& morse) {
+  for (int i = 0; i < morse.length(); i++) {
+    char symbol = morse[i];
+
+    if (symbol == '.') {
+      dot();
+    }
+    else if (symbol == '-') {
+      dash();
+    }
+    else if (symbol == ' ') {
+      delay(LETTER_GAP - SYMBOL_GAP);
+    }
+    else if (symbol == '/') {
+      delay(WORD_GAP - LETTER_GAP);
+    }
+  }
+
+  digitalWrite(LED_PIN, LOW);
+}
+
+// Generate the webpage
+String makePage(const String& message = "",
+                const String& morse = "",
+                const String& status = "") {
+  String html = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ESP32 Morse Code</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      background: #101820;
+      color: white;
+      text-align: center;
+      padding: 25px 12px;
+    }
+    .box {
+      max-width: 600px;
+      margin: 20px auto;
+      padding: 22px;
+      background: #202b36;
+      border-radius: 12px;
+    }
+    input {
+      width: 90%;
+      max-width: 420px;
+      box-sizing: border-box;
+      padding: 12px;
+      font-size: 17px;
+      border-radius: 6px;
+      border: none;
+    }
+    button {
+      margin-top: 15px;
+      padding: 12px 22px;
+      background: #00b86b;
+      color: white;
+      font-size: 16px;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+    .morse {
+      overflow-wrap: anywhere;
+      font-size: 20px;
+      line-height: 1.7;
+    }
+  </style>
+</head>
+<body>
+  <h1>ESP32 Morse Code Generator</h1>
+  <div class="box">
+    <form action="/send" method="GET">
+      <input type="text" name="text" maxlength="80"
+        placeholder="Enter a message (A-Z, 0-9)" required>
+      <br>
+      <button type="submit">Flash Morse Code</button>
+    </form>
+    <h3>Status</h3>
+    <p>)rawliteral";
+
+  html += status;
+
+  html += R"rawliteral(</p>
+    <h3>Message</h3>
+    <p>)rawliteral";
+
+  html += message;
+
+  html += R"rawliteral(</p>
+    <h3>Generated Morse Code</h3>
+    <p class="morse">)rawliteral";
+
+  html += morse;
+
+  html += R"rawliteral(</p>
+  </div>
+</body>
+</html>
+)rawliteral";
+
+  return html;
+}
+
+// Display the home page
+void handleRoot() {
+  server.send(200, "text/html", makePage());
+}
+
+// Receive text and flash the corresponding Morse code
+void handleSend() {
+  String message = server.arg("text");
+  message.trim();
+
+  if (message.length() == 0) {
+    server.send(400, "text/plain", "Please enter a message.");
+    return;
+  }
+
+  if (message.length() > 80) {
+    server.send(400, "text/plain", "Message is too long.");
+    return;
+  }
+
+  String morse = convertToMorse(message);
+
+  server.send(
+    200,
+    "text/html",
+    makePage(message, morse, "Flashing Morse code...")
+  );
+
+  Serial.print("Message: ");
+  Serial.println(message);
+
+  Serial.print("Morse code: ");
+  Serial.println(morse);
+
+  flashMorse(morse);
+
+  Serial.println("Morse transmission complete.");
+}
+
+// Initialize ESP32
+void setup() {
+  pinMode(LED_PIN, OUTPUT);
+  digitalWrite(LED_PIN, LOW);
+
+  Serial.begin(115200);
+  delay(500);
+
+  Serial.println();
+  Serial.println("MARVEL Task 6 - Morse Code");
+
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
+
+  Serial.print("Connecting to Wi-Fi...");
+
+  unsigned long startTime = millis();
+
+  while (WiFi.status() != WL_CONNECTED &&
+         millis() - startTime < 30000) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println();
+
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("Wi-Fi connection failed.");
+    Serial.println("Check SSID, password and 2.4 GHz Wi-Fi.");
+    return;
+  }
+
+  Serial.println("Wi-Fi connected!");
+  Serial.print("Open: http://");
+  Serial.println(WiFi.localIP());
+
+  server.on("/", HTTP_GET, handleRoot);
+  server.on("/send", HTTP_GET, handleSend);
+
+  server.onNotFound([]() {
+    server.send(404, "text/plain", "Page not found.");
+  });
+
+  server.begin();
+
+  Serial.println("Web server started.");
+}
+
+// Continuously handle browser requests
+void loop() {
+  if (WiFi.status() == WL_CONNECTED) {
+    server.handleClient();
+  }
+}
+```
+
+## How to Run
+
+1. Replace `YOUR_WIFI_NAME` and `YOUR_WIFI_PASSWORD` with your Wi-Fi credentials.
+2. Select your ESP32 board and the correct COM port in Arduino IDE.
+3. Upload the code and open Serial Monitor at `115200` baud.
+4. Open the printed IP address in a browser connected to the same Wi-Fi network.
+5. Enter a message such as `HELLO WORLD` and click **Flash Morse Code**.
+
+## Notes
+
+- The sketch supports letters A–Z and digits 0–9. Unsupported punctuation is ignored.
+- The external LED must be connected through a resistor.
+- The code uses `delay()` while flashing, so the ESP32 cannot process another web request until the current message finishes.
+- The sketch is written for the ESP32 Arduino core with its built-in `WiFi.h` and `WebServer.h` libraries. It has not been compiled on the physical board, so successful compilation and operation should be confirmed in Arduino IDE.
