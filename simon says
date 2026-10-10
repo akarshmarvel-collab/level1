@@ -1,0 +1,106 @@
+
+const int ledPins[] = {13, 14, 25, 26};
+const int buttonPins[] = {18, 19, 21, 22};
+
+const int NUM_LEDS = 4;
+const int MAX_LEVEL = 100;
+
+int sequence[MAX_LEVEL];
+int level = 1;
+
+void setup() {
+  Serial.begin(115200);
+
+  for (int i = 0; i < NUM_LEDS; i++) {
+    pinMode(ledPins[i], OUTPUT);
+    pinMode(buttonPins[i], INPUT_PULLUP);
+    digitalWrite(ledPins[i], LOW);
+  }
+
+  randomSeed(micros());
+  Serial.println("Simon Says Game Started!");
+}
+
+void loop() {
+  if (level == 0 || level > MAX_LEVEL) {
+    level = 1;
+  }
+
+  sequence[level - 1] = random(0, NUM_LEDS);
+
+  Serial.print("Level: ");
+  Serial.println(level);
+
+  showSequence();
+
+  for (int i = 0; i < level; i++) {
+    int pressedButton = readButton();
+
+    if (pressedButton != sequence[i]) {
+      Serial.println("Wrong button! Game Over!");
+      gameOver();
+      level = 0;
+      delay(500);
+      return;
+    }
+
+    flashLED(pressedButton, 200);
+  }
+
+  Serial.println("Correct! Next level.");
+  delay(500);
+  level++;
+}
+
+void showSequence() {
+  delay(400);
+
+  for (int i = 0; i < level; i++) {
+    flashLED(sequence[i], 350);
+    delay(180);
+  }
+}
+
+void flashLED(int index, int duration) {
+  digitalWrite(ledPins[index], HIGH);
+  delay(duration);
+  digitalWrite(ledPins[index], LOW);
+  delay(100);
+}
+
+int readButton() {
+  while (true) {
+    for (int i = 0; i < NUM_LEDS; i++) {
+      if (digitalRead(buttonPins[i]) == LOW) {
+        delay(25);
+
+        if (digitalRead(buttonPins[i]) == LOW) {
+          while (digitalRead(buttonPins[i]) == LOW) {
+            delay(10);
+          }
+
+          delay(25);
+          return i;
+        }
+      }
+    }
+  }
+}
+
+void gameOver() {
+  for (int repeat = 0; repeat < 3; repeat++) {
+    for (int i = 0; i < NUM_LEDS; i++) {
+      digitalWrite(ledPins[i], HIGH);
+    }
+
+    delay(300);
+
+    for (int i = 0; i < NUM_LEDS; i++) {
+      digitalWrite(ledPins[i], LOW);
+    }
+
+    delay(300);
+  }
+
+  Serial.println("Restarting from Level 1...");
+}
