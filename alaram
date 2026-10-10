@@ -1,0 +1,457 @@
+# MARVEL Task 9 – Fire Alarm System with SMS Alerts
+
+## 1. Components Required
+
+1. ESP32 DevKit V1
+2. 3-pin DHT11 temperature and humidity sensor
+3. USB cable for programming the ESP32
+4. Wi-Fi connection with internet access
+5. Twilio account with Programmable Messaging configured
+
+No LED or buzzer is required.
+
+## 2. Connections
+
+| DHT11 Pin | ESP32 DevKit V1 Pin |
+|---|---|
+| VCC / `+` | 3V3 |
+| DATA / `S` / `OUT` | GPIO 4 |
+| GND / `-` | GND |
+
+Notes:
+- Check the labels on your specific DHT11 module because the physical pin order can vary.
+- The ESP32 connects to your computer through USB.
+- Do not connect the DHT11 data pin to 5V.
+- The DHT11 module used in this task has three pins, so use its labelled signal pin for GPIO 4.
+
+## 3. Arduino IDE Setup
+
+Install the following libraries through **Arduino IDE → Library Manager**:
+
+- `DHT sensor library` by Adafruit
+- `Adafruit Unified Sensor`
+
+Select:
+
+- Board: `DOIT ESP32 DEVKIT V1`
+- Port: the COM port assigned to your ESP32
+- Serial Monitor baud rate: `115200`
+
+The `WiFi`, `WiFiClientSecure`, and `HTTPClient` libraries are included with the ESP32 Arduino core.
+
+## 4. Twilio Configuration
+
+Before uploading the code, collect these values from your Twilio Console:
+
+- **Account SID:** identifies your Twilio account.
+- **Auth Token:** authenticates requests to Twilio.
+- **Twilio SMS-enabled phone number:** the sender number assigned to your account.
+- **Recipient phone number:** the phone that should receive the alert, in international format such as `+91XXXXXXXXXX`.
+
+For this project, the API endpoint is:
+
+`https://api.twilio.com/2010-04-01/Accounts/ACCOUNT_SID/Messages.json`
+
+The code constructs this URL using your Account SID.
+
+**Important trial limitation:** Twilio trial accounts can restrict recipients, geographic destinations, and custom message content. Your earlier trial errors mean successful delivery is not guaranteed. A trial account may reject a custom fire-alert message even when the code and credentials are correct. See the official [Twilio trial restrictions](https://www.twilio.com/docs/usage/trials).
+
+## 5. Complete ESP32 Source Code
+
+Copy the entire program below into one Arduino IDE file named `Task9_FireAlarm.ino`.
+
+Replace all credential placeholders before uploading. Never share your Auth Token publicly.
+
+```cpp
+/*
+  MARVEL Task 9 - Fire Alarm System with SMS Alerts
+
+  Board:
+    ESP32 DevKit V1
+
+  Sensor:
+    3-pin DHT11
+
+  Connections:
+    DHT11 VCC  -> ESP32 3V3
+    DHT11 DATA -> ESP32 GPIO 4
+    DHT11 GND  -> ESP32 GND
+
+  Features:
+    - Reads temperature and humidity.
+    - Connects to Wi-Fi.
+    - Checks a temperature threshold.
+    - Sends an SMS request using Twilio's REST API.
+    - Checks the HTTP status and response.
+    - Retries if Twilio rejects the request.
+
+  Security note:
+    This example uses setInsecure() for a simple demonstration.
+    It does not verify Twilio's TLS certificate and should not be
+    used in a safety-critical or production system. Use proper
+    certificate validation for a production implementation.
+*/
+
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <HTTPClient.h>
+#include <DHT.h>
+#include <mbedtls/base64.h>
+
+// ---------------- SENSOR CONFIGURATION ----------------
+
+#define DHT_PIN 4
+#define DHT_TYPE DHT11
+
+DHT dht(DHT_PIN, DHT_TYPE);
+
+// ---------------- TEMPERATURE THRESHOLD ----------------
+
+// Demonstration value only.
+// Set an appropriate threshold for your intended application.
+const float FIRE_TEMP_THRESHOLD = 26.0;
+
+// ---------------- WI-FI CREDENTIALS ----------------
+
+const char* WIFI_SSID = "YOUR_WIFI_NAME";
+const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
+
+// ---------------- TWILIO CREDENTIALS ----------------
+
+// Find these in your Twilio Console.
+// Keep these values private.
+
+const char* TWILIO_ACCOUNT_SID = "YOUR_ACCOUNT_SID";
+const char* TWILIO_AUTH_TOKEN = "YOUR_AUTH_TOKEN";
+
+// Must be a Twilio SMS-enabled sender number assigned to your account.
+const char* TWILIO_FROM_NUMBER = "+1XXXXXXXXXX";
+
+// Recipient number in international format.
+const char* TWILIO_TO_NUMBER = "+91XXXXXXXXXX";
+
+// ---------------- ALARM SETTINGS ----------------
+
+bool alarmSent = false;
+
+const unsigned long SENSOR_INTERVAL_MS = 3000;
+unsigned long lastSensorRead = 0;
+
+// ---------------- URL ENCODING ----------------
+
+// Converts text into application/x-www-form-urlencoded format.
+// This ensures spaces and special characters are transmitted
+// correctly in the HTTP POST body.
+
+String urlEncode(const String& input) {
+  String encoded = "";
+  char hexBuffer[4];
+
+  for (size_t i = 0; i < input.length(); i++) {
+    unsigned char c = (unsigned char)input[i];
+
+    if ((c >= 'A' && c <= 'Z') ||
+        (c >= 'a' && c <= 'z') ||
+        (c >= '0' && c <= '9') ||
+        c == '-' || c == '_' ||
+        c == '.' || c == '~') {
+
+      encoded += (char)c;
+
+    } else {
+      snprintf(
+        hexBuffer,
+        sizeof(hexBuffer),
+        "%%%02X",
+        c
+      );
+
+      encoded += hexBuffer;
+    }
+  }
+
+  return encoded;
+}
+
+// ---------------- BASE64 ENCODING ----------------
+
+// Twilio HTTP Basic Authentication requires:
+// Base64(Account SID + ":" + Auth Token)
+
+String base64Encode(const String& input) {
+  size_t outputLength = 0;
+
+  // Base64 output needs approximately 4/3 of the input length.
+  size_t bufferSize = 4 * ((input.length() + 2) / 3) + 1;
+
+  unsigned char* output =
+    (unsigned char*)malloc(bufferSize);
+
+  if (output == nullptr) {
+    return "";
+  }
+
+  int result = mbedtls_base64_encode(
+    output,
+    bufferSize,
+    &outputLength,
+    (const unsigned char*)input.c_str(),
+    input.length()
+  );
+
+  if (result != 0) {
+    free(output);
+    return "";
+  }
+
+  output[outputLength] = '\0';
+
+  String encoded = (char*)output;
+
+  free(output);
+
+  return encoded;
+}
+
+// ---------------- WI-FI CONNECTION ----------------
+
+bool connectWiFi() {
+  if (WiFi.status() == WL_CONNECTED) {
+    return true;
+  }
+
+  Serial.println();
+  Serial.print("Connecting to Wi-Fi");
+
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+
+  unsigned long startTime = millis();
+  const unsigned long timeoutMs = 20000;
+
+  while (WiFi.status() != WL_CONNECTED &&
+         millis() - startTime < timeoutMs) {
+
+    Serial.print(".");
+    delay(500);
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println();
+    Serial.println("Wi-Fi connected.");
+
+    Serial.print("IP address: ");
+    Serial.println(WiFi.localIP());
+
+    return true;
+  }
+
+  Serial.println();
+  Serial.println("Wi-Fi connection failed.");
+
+  return false;
+}
+
+// ---------------- SEND SMS THROUGH TWILIO ----------------
+
+bool sendSMS(float temperature, float humidity) {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("SMS request failed: Wi-Fi is disconnected.");
+    return false;
+  }
+
+  String credentials =
+    String(TWILIO_ACCOUNT_SID) +
+    ":" +
+    String(TWILIO_AUTH_TOKEN);
+
+  String encodedCredentials = base64Encode(credentials);
+
+  if (encodedCredentials.length() == 0) {
+    Serial.println("Failed to encode Twilio credentials.");
+    return false;
+  }
+
+  String url =
+    "https://api.twilio.com/2010-04-01/Accounts/" +
+    String(TWILIO_ACCOUNT_SID) +
+    "/Messages.json";
+
+  WiFiClientSecure secureClient;
+
+  // Demonstration only; certificate validation is disabled.
+  secureClient.setInsecure();
+
+  HTTPClient https;
+
+  if (!https.begin(secureClient, url)) {
+    Serial.println("Could not start HTTPS connection.");
+    return false;
+  }
+
+  https.setTimeout(15000);
+
+  https.addHeader(
+    "Authorization",
+    "Basic " + encodedCredentials
+  );
+
+  https.addHeader(
+    "Content-Type",
+    "application/x-www-form-urlencoded"
+  );
+
+  String message =
+    "FIRE ALERT: Temperature is " +
+    String(temperature, 1) +
+    " C. Humidity is " +
+    String(humidity, 1) +
+    "%. Please check the location.";
+
+  String postData =
+    "To=" + urlEncode(String(TWILIO_TO_NUMBER)) +
+    "&From=" + urlEncode(String(TWILIO_FROM_NUMBER)) +
+    "&Body=" + urlEncode(message);
+
+  Serial.println("Submitting SMS request to Twilio...");
+
+  int httpCode = https.POST(postData);
+  String response = https.getString();
+
+  Serial.print("HTTP status code: ");
+  Serial.println(httpCode);
+
+  // The response can contain account-related information.
+  // Do not print credentials or share diagnostic logs publicly.
+  Serial.print("Twilio response: ");
+  Serial.println(response);
+
+  https.end();
+
+  /*
+    Twilio normally returns HTTP 201 Created when a message
+    resource is successfully created.
+
+    This means Twilio accepted the request and created a message
+    resource; it does not prove that the recipient received the SMS.
+  */
+
+  if (httpCode == HTTP_CODE_CREATED &&
+      response.indexOf("\"sid\"") >= 0) {
+
+    Serial.println(
+      "Twilio accepted the message request."
+    );
+
+    Serial.println(
+      "Check Twilio message status and the recipient's phone."
+    );
+
+    return true;
+  }
+
+  Serial.println("Twilio did not accept the SMS request.");
+
+  if (httpCode < 0) {
+    Serial.println(
+      "Check Wi-Fi, internet access, and HTTPS connectivity."
+    );
+  } else {
+    Serial.println(
+      "Check the Twilio error response and account configuration."
+    );
+  }
+
+  return false;
+}
+
+// ---------------- SETUP ----------------
+
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+
+  Serial.println();
+  Serial.println("==================================");
+  Serial.println("MARVEL Task 9");
+  Serial.println("Fire Alarm System with SMS Alerts");
+  Serial.println("==================================");
+
+  dht.begin();
+
+  Serial.println("DHT11 initialized.");
+
+  connectWiFi();
+
+  Serial.println("System is ready.");
+}
+
+// ---------------- MAIN LOOP ----------------
+
+void loop() {
+  // Reconnect if Wi-Fi is disconnected.
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("Wi-Fi disconnected. Reconnecting...");
+    connectWiFi();
+  }
+
+  // Read the sensor at the configured interval.
+  if (millis() - lastSensorRead < SENSOR_INTERVAL_MS) {
+    delay(20);
+    return;
+  }
+
+  lastSensorRead = millis();
+
+  float temperature = dht.readTemperature();
+  float humidity = dht.readHumidity();
+
+  // Reject invalid sensor readings.
+  if (isnan(temperature) || isnan(humidity)) {
+    Serial.println("Failed to read DHT11 sensor.");
+    return;
+  }
+
+  Serial.println();
+  Serial.println("----- SENSOR READINGS -----");
+
+  Serial.print("Temperature: ");
+  Serial.print(temperature, 1);
+  Serial.println(" C");
+
+  Serial.print("Humidity: ");
+  Serial.print(humidity, 1);
+  Serial.println(" %");
+
+  // Check the temperature threshold.
+  if (temperature >= FIRE_TEMP_THRESHOLD) {
+    Serial.println("WARNING: Temperature threshold exceeded!");
+
+    if (!alarmSent) {
+      bool accepted = sendSMS(temperature, humidity);
+
+      // Set the flag only if Twilio accepted the request.
+      if (accepted) {
+        alarmSent = true;
+        Serial.println("SMS request accepted by Twilio.");
+      } else {
+        alarmSent = false;
+        Serial.println(
+          "SMS not confirmed. Another attempt will be made."
+        );
+      }
+    } else {
+      Serial.println(
+        "Alert request already accepted for this high-temperature period."
+      );
+    }
+
+  } else {
+    Serial.println("Temperature is below the threshold.");
+
+    // Permit another alert if the temperature rises again later.
+    alarmSent = false;
+  }
+}
+```
+
