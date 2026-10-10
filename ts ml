@@ -1,0 +1,116 @@
+
+# MARVEL Task 5 - Linear Regression with Train/Test Evaluation
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+
+# 1. Create illustrative dataset (not real sensor readings)
+data = {
+    "Humidity": [35, 40, 42, 45, 48, 50, 53, 55, 58, 60,
+                 63, 65, 68, 70, 75],
+    "Soil_Moisture": [18, 22, 21, 25, 27, 26, 30, 31, 29, 34,
+                      35, 33, 38, 39, 42]
+}
+
+df = pd.DataFrame(data)
+
+print("Dataset:")
+print(df)
+
+# 2. Separate input and target
+X = df[["Humidity"]]
+y = df["Soil_Moisture"]
+
+# 3. Split data: 80% training, 20% testing
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42
+)
+
+print("\nTraining observations:", len(X_train))
+print("Testing observations:", len(X_test))
+
+# 4. Train the model using training data only
+model = LinearRegression()
+model.fit(X_train, y_train)
+
+# 5. Predict the test observations
+test_predictions = model.predict(X_test)
+
+# 6. Display the learned equation
+slope = model.coef_[0]
+intercept = model.intercept_
+
+print("\nRegression equation:")
+print(f"Soil Moisture = {slope:.4f} * Humidity + ({intercept:.4f})")
+
+# 7. Evaluate the model on unseen test observations
+mae = mean_absolute_error(y_test, test_predictions)
+mse = mean_squared_error(y_test, test_predictions)
+rmse = np.sqrt(mse)
+r2 = r2_score(y_test, test_predictions)
+
+print("\nTEST RESULTS (unseen observations)")
+print("----------------------------------")
+print(f"MAE: {mae:.4f}")
+print(f"MSE: {mse:.4f}")
+print(f"RMSE: {rmse:.4f}")
+print(f"R-squared: {r2:.4f}")
+
+# 8. Compare actual and predicted values
+results = pd.DataFrame({
+    "Humidity": X_test["Humidity"].to_numpy(),
+    "Actual_Moisture": y_test.to_numpy(),
+    "Predicted_Moisture": test_predictions
+})
+
+results = results.sort_values("Humidity")
+print("\nActual vs Predicted:")
+print(results.round(2).to_string(index=False))
+
+# 9. Plot training data, test data and regression line
+humidity_line = np.linspace(
+    X["Humidity"].min(),
+    X["Humidity"].max(),
+    100
+)
+
+line_data = pd.DataFrame({"Humidity": humidity_line})
+moisture_line = model.predict(line_data)
+
+plt.figure(figsize=(8, 5))
+plt.scatter(X_train["Humidity"], y_train, label="Training data")
+plt.scatter(
+    X_test["Humidity"],
+    y_test,
+    marker="x",
+    s=80,
+    label="Test data"
+)
+plt.plot(
+    humidity_line,
+    moisture_line,
+    color="red",
+    label="Regression line"
+)
+
+plt.xlabel("Humidity (%)")
+plt.ylabel("Soil Moisture (%)")
+plt.title("Humidity vs Soil Moisture - Train/Test Evaluation")
+plt.grid(True)
+plt.legend()
+plt.tight_layout()
+plt.show()
+
+# 10. Predict for a new humidity value
+new_humidity = pd.DataFrame({"Humidity": [60]})
+prediction = model.predict(new_humidity)[0]
+
+print("\nNew prediction:")
+print("Humidity: 60%")
+print(f"Predicted soil moisture: {prediction:.2f}%")
+print("Illustrative prediction only, not a sensor measurement.")
