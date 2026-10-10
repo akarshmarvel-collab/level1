@@ -1,0 +1,247 @@
+
+/*
+=========================================================
+MARVEL TASK 3b - CONTROLLING LEDs USING MQTT
+Board       : ESP32 DevKit V1
+MQTT Broker : HiveMQ Cloud
+Mobile App  : MQTT Explore
+Library     : PubSubClient
+=========================================================
+
+CONNECTIONS
+-----------
+
+LED 1:
+ESP32 GPIO23 -> 220-ohm resistor -> LED long leg (+)
+LED short leg (-) -> ESP32 GND
+
+LED 2:
+ESP32 GPIO22 -> 220-ohm resistor -> LED long leg (+)
+LED short leg (-) -> ESP32 GND
+
+LED 3:
+ESP32 GPIO21 -> 220-ohm resistor -> LED long leg (+)
+LED short leg (-) -> ESP32 GND
+
+Each LED needs its OWN resistor.
+The resistor can face either direction.
+All three LED cathodes can share ESP32 GND.
+
+MQTT SETTINGS
+-------------
+Topic: home/led
+
+Payloads:
+LED1 ON
+LED1 OFF
+LED2 ON
+LED2 OFF
+LED3 ON
+LED3 OFF
+
+=========================================================
+*/
+
+// Libraries
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <PubSubClient.h>
+
+// ---------- Wi-Fi Credentials ----------
+const char* ssid = "YOUR_WIFI_NAME";
+const char* wifiPassword = "YOUR_WIFI_PASSWORD";
+
+// ---------- HiveMQ Cloud Credentials ----------
+const char* mqtt_server =
+  "6444c2e640e84339bec8d56af752a2a4.s1.eu.hivemq.cloud";
+
+const int mqtt_port = 8883;
+
+const char* mqtt_user = "esp32";
+const char* mqtt_pass = "YOUR_HIVEMQ_PASSWORD";
+
+// ---------- LED GPIO Pins ----------
+const int LED1 = 23;
+const int LED2 = 22;
+const int LED3 = 21;
+
+// ---------- MQTT Objects ----------
+WiFiClientSecure espClient;
+PubSubClient client(espClient);
+
+// ---------- MQTT Topic ----------
+const char* topic = "home/led";
+
+// ---------- Process Incoming Messages ----------
+void callback(char* receivedTopic,
+              byte* payload,
+              unsigned int length)
+{
+  // Convert the received payload into text.
+  String message = "";
+
+  for (unsigned int i = 0; i < length; i++)
+  {
+    message += (char)payload[i];
+  }
+
+  Serial.println();
+  Serial.print("Topic received: ");
+  Serial.println(receivedTopic);
+
+  Serial.print("Message received: ");
+  Serial.println(message);
+
+  // Control LED 1
+  if (message == "LED1 ON")
+  {
+    digitalWrite(LED1, HIGH);
+    Serial.println("LED 1 is ON");
+  }
+  else if (message == "LED1 OFF")
+  {
+    digitalWrite(LED1, LOW);
+    Serial.println("LED 1 is OFF");
+  }
+
+  // Control LED 2
+  else if (message == "LED2 ON")
+  {
+    digitalWrite(LED2, HIGH);
+    Serial.println("LED 2 is ON");
+  }
+  else if (message == "LED2 OFF")
+  {
+    digitalWrite(LED2, LOW);
+    Serial.println("LED 2 is OFF");
+  }
+
+  // Control LED 3
+  else if (message == "LED3 ON")
+  {
+    digitalWrite(LED3, HIGH);
+    Serial.println("LED 3 is ON");
+  }
+  else if (message == "LED3 OFF")
+  {
+    digitalWrite(LED3, LOW);
+    Serial.println("LED 3 is OFF");
+  }
+  else
+  {
+    Serial.println("Unknown command. Check the payload.");
+  }
+}
+
+// ---------- Connect to Wi-Fi ----------
+void connectWiFi()
+{
+  Serial.print("Connecting to Wi-Fi: ");
+  Serial.println(ssid);
+
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, wifiPassword);
+
+  while (WiFi.status() != WL_CONNECTED)
+  {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println();
+  Serial.println("Wi-Fi connected!");
+
+  Serial.print("ESP32 IP address: ");
+  Serial.println(WiFi.localIP());
+}
+
+// ---------- Connect to HiveMQ ----------
+void reconnectMQTT()
+{
+  while (!client.connected())
+  {
+    Serial.print("Connecting MQTT...");
+
+    // Client ID must be unique among simultaneously
+    // connected clients on the same broker.
+    if (client.connect("ESP32_LED_Client", mqtt_user, mqtt_pass))
+    {
+      Serial.println("Connected!");
+
+      // Subscribe only after MQTT connection succeeds.
+      if (client.subscribe(topic))
+      {
+        Serial.print("Subscribed to: ");
+        Serial.println(topic);
+      }
+      else
+      {
+        Serial.println("Subscription failed!");
+      }
+    }
+    else
+    {
+      Serial.print("Failed. State = ");
+      Serial.println(client.state());
+
+      delay(3000);
+    }
+  }
+}
+
+// ---------- Setup ----------
+void setup()
+{
+  Serial.begin(115200);
+
+  // Configure all LED pins as outputs.
+  pinMode(LED1, OUTPUT);
+  pinMode(LED2, OUTPUT);
+  pinMode(LED3, OUTPUT);
+
+  // Keep all LEDs OFF at startup.
+  digitalWrite(LED1, LOW);
+  digitalWrite(LED2, LOW);
+  digitalWrite(LED3, LOW);
+
+  // Establish Wi-Fi connection.
+  connectWiFi();
+
+  // Enable TLS transport for HiveMQ Cloud.
+  // setInsecure() skips server certificate verification.
+  // Suitable for a basic learning demo, not production.
+  espClient.setInsecure();
+
+  // Configure MQTT broker and message callback.
+  client.setServer(mqtt_server, mqtt_port);
+  client.setCallback(callback);
+
+  // Allow sufficient time for incoming MQTT messages.
+  client.setSocketTimeout(15);
+  client.setKeepAlive(30);
+
+  // Connect to the MQTT broker and subscribe.
+  reconnectMQTT();
+}
+
+// ---------- Main Loop ----------
+void loop()
+{
+  // Reconnect Wi-Fi if it disconnects.
+  if (WiFi.status() != WL_CONNECTED)
+  {
+    connectWiFi();
+  }
+
+  // Reconnect MQTT if necessary.
+  if (!client.connected())
+  {
+    reconnectMQTT();
+  }
+
+  // Process incoming MQTT messages.
+  // This must be called repeatedly.
+  client.loop();
+
+  delay(10);
+}
