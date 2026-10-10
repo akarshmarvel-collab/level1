@@ -1,0 +1,507 @@
+# MARVEL Level 1 – Task 7: Health Vitals Dashboard
+
+This file contains the wiring connections, Arduino IDE setup, complete ESP32 source code, dashboard, and troubleshooting steps for the ESP32 + MAX30100 Health Vitals Dashboard.
+
+## 1. Components Required
+
+- ESP32 DOIT DevKit V1
+- MAX30100 pulse oximeter sensor module
+- USB data cable
+- Jumper wires
+- Arduino IDE
+- Wi-Fi hotspot or router
+- Laptop or computer with a web browser
+
+## 2. Wiring Connections
+
+Connect the MAX30100 sensor to the ESP32 as follows.
+
+| MAX30100 Pin | ESP32 DOIT DevKit V1 |
+|---|---|
+| VIN / VCC | 3V3 |
+| GND | GND |
+| SDA | GPIO 21 |
+| SCL | GPIO 22 |
+
+Important:
+- Confirm the pin labels on your particular sensor module.
+- Use 3.3 V for this setup.
+- Ensure the ESP32 and sensor share a common GND.
+- Keep the SDA and SCL wires short and connections secure.
+
+## 3. Arduino IDE Setup
+
+1. Install the ESP32 board package in Arduino IDE if it is not already installed.
+2. Select **Tools → Board → ESP32 Arduino → DOIT ESP32 DEVKIT V1**. The menu wording may vary depending on the IDE version.
+3. Open **Sketch → Include Library → Manage Libraries**.
+4. Search for and install **MAX30100lib by OXullo Intersecans**.
+5. The libraries `WiFi.h`, `WebServer.h`, and `Wire.h` are included with the ESP32 board package.
+6. Select the correct COM port for your ESP32.
+7. Set the Serial Monitor baud rate to **115200**.
+
+Before uploading, replace the Wi-Fi password placeholder in the source code with your current hotspot password. If you previously shared your password, change it first and use the new one locally.
+
+## 4. Complete Arduino Source Code
+
+Copy the complete code below into one Arduino `.ino` file.
+
+```cpp
+#include <WiFi.h>
+#include <WebServer.h>
+#include <Wire.h>
+#include "MAX30100_PulseOximeter.h"
+
+// Wi-Fi settings
+const char* WIFI_SSID = "Sai's POCO X7";
+const char* WIFI_PASSWORD = "YOUR_NEW_HOTSPOT_PASSWORD";
+
+// MAX30100 I2C pins
+#define I2C_SDA 21
+#define I2C_SCL 22
+
+// Sensor and web server objects
+PulseOximeter pox;
+WebServer server(80);
+
+// Sensor status
+bool sensorReady = false;
+bool bpmValid = false;
+bool spo2Valid = false;
+
+// Store the latest valid readings
+float lastValidBPM = 0.0f;
+float lastValidSpO2 = 0.0f;
+
+// Sampling interval
+unsigned long lastSampleTime = 0;
+const unsigned long SAMPLE_INTERVAL_MS = 1000;
+
+// HTML dashboard
+const char INDEX_HTML[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ESP32 Health Vitals Dashboard</title>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+<style>
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  padding: 20px;
+  font-family: Arial, sans-serif;
+  background: #f3f6fb;
+  color: #172033;
+}
+
+main {
+  max-width: 1000px;
+  margin: auto;
+}
+
+h1 {
+  text-align: center;
+  margin-bottom: 8px;
+}
+
+.subtitle {
+  text-align: center;
+  color: #586174;
+  margin-bottom: 24px;
+}
+
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 16px;
+  margin-bottom: 20px;
+}
+
+.card, .chart-card {
+  background: white;
+  border-radius: 14px;
+  padding: 20px;
+  box-shadow: 0 3px 14px rgba(20, 35, 70, 0.08);
+}
+
+.label {
+  color: #586174;
+  font-size: 0.95rem;
+}
+
+.value {
+  font-size: 2.5rem;
+  font-weight: 700;
+  margin: 12px 0 4px;
+}
+
+.unit, .status, .note {
+  color: #586174;
+}
+
+.chart-card {
+  margin-bottom: 18px;
+}
+
+.chart-wrap {
+  height: 260px;
+}
+
+.note {
+  font-size: 0.88rem;
+  line-height: 1.5;
+}
+</style>
+</head>
+
+<body>
+<main>
+  <h1>Health Vitals Dashboard</h1>
+  <p class="subtitle">ESP32 + MAX30100 pulse oximeter</p>
+
+  <section class="cards">
+    <div class="card">
+      <div class="label">Heart rate</div>
+      <div class="value" id="bpm">--</div>
+      <div class="unit">beats per minute (BPM)</div>
+      <p class="status" id="bpmStatus">
+        Waiting for a valid reading
+      </p>
+    </div>
+
+    <div class="card">
+      <div class="label">Blood oxygen estimate</div>
+      <div class="value" id="spo2">--</div>
+      <div class="unit">SpO₂ (%)</div>
+      <p class="status" id="spo2Status">
+        Waiting for a valid reading
+      </p>
+    </div>
+  </section>
+
+  <section class="chart-card">
+    <h2>Heart rate history</h2>
+    <div class="chart-wrap">
+      <canvas id="bpmChart"></canvas>
+    </div>
+  </section>
+
+  <section class="chart-card">
+    <h2>SpO₂ history</h2>
+    <div class="chart-wrap">
+      <canvas id="spo2Chart"></canvas>
+    </div>
+  </section>
+
+  <p class="note">
+    Keep your finger still and cover the sensor consistently.
+    This educational project is not a medical device and must
+    not be used to diagnose or make medical decisions.
+  </p>
+
+  <p class="note" id="connectionStatus">
+    Connecting to ESP32...
+  </p>
+</main>
+
+<script>
+const MAX_POINTS = 30;
+
+const labels = [];
+const bpmData = [];
+const spo2Data = [];
+
+function makeChart(canvasId, label, data, min, max) {
+  return new Chart(document.getElementById(canvasId), {
+    type: 'line',
+
+    data: {
+      labels: labels,
+      datasets: [{
+        label: label,
+        data: data,
+        borderWidth: 2,
+        pointRadius: 2,
+        tension: 0.25,
+        spanGaps: false
+      }]
+    },
+
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+
+      scales: {
+        y: {
+          min: min,
+          max: max
+        }
+      }
+    }
+  });
+}
+
+const bpmChart = makeChart(
+  'bpmChart',
+  'BPM',
+  bpmData,
+  40,
+  180
+);
+
+const spo2Chart = makeChart(
+  'spo2Chart',
+  'SpO₂ (%)',
+  spo2Data,
+  80,
+  100
+);
+
+function addPoint(array, value) {
+  array.push(value);
+
+  while (array.length > MAX_POINTS) {
+    array.shift();
+  }
+}
+
+async function refreshData() {
+  try {
+    const response = await fetch('/data', {
+      cache: 'no-store'
+    });
+
+    if (!response.ok) {
+      throw new Error('HTTP ' + response.status);
+    }
+
+    const data = await response.json();
+
+    document.getElementById('bpm').textContent =
+      data.bpmValid
+        ? Number(data.bpm).toFixed(1)
+        : '--';
+
+    document.getElementById('spo2').textContent =
+      data.spo2Valid
+        ? Number(data.spo2).toFixed(1)
+        : '--';
+
+    document.getElementById('bpmStatus').textContent =
+      data.bpmValid
+        ? 'Valid sensor reading'
+        : 'No valid heart-rate reading yet';
+
+    document.getElementById('spo2Status').textContent =
+      data.spo2Valid
+        ? 'Valid sensor reading'
+        : 'No valid SpO₂ reading yet';
+
+    const timeLabel = new Date().toLocaleTimeString();
+
+    labels.push(timeLabel);
+
+    addPoint(
+      bpmData,
+      data.bpmValid ? Number(data.bpm) : null
+    );
+
+    addPoint(
+      spo2Data,
+      data.spo2Valid ? Number(data.spo2) : null
+    );
+
+    while (labels.length > MAX_POINTS) {
+      labels.shift();
+    }
+
+    bpmChart.update();
+    spo2Chart.update();
+
+    document.getElementById('connectionStatus').textContent =
+      'Connected to ESP32 • Updated ' + timeLabel;
+
+  } catch (error) {
+    document.getElementById('connectionStatus').textContent =
+      'Could not fetch data. Check Wi-Fi and refresh the page.';
+  }
+}
+
+refreshData();
+setInterval(refreshData, 1000);
+</script>
+</body>
+</html>
+)rawliteral";
+
+// Called when a heartbeat is detected
+void onBeatDetected() {
+  Serial.println("Beat detected");
+}
+
+// Serve the dashboard page
+void handleRoot() {
+  server.send_P(200, "text/html", INDEX_HTML);
+}
+
+// Send sensor readings as JSON
+void handleData() {
+  String json = "{";
+
+  json += "\"sensorReady\":";
+  json += (sensorReady ? "true" : "false");
+
+  json += ",\"bpmValid\":";
+  json += (bpmValid ? "true" : "false");
+
+  json += ",\"spo2Valid\":";
+  json += (spo2Valid ? "true" : "false");
+
+  json += ",\"bpm\":";
+  json += String(lastValidBPM, 1);
+
+  json += ",\"spo2\":";
+  json += String(lastValidSpO2, 1);
+
+  json += "}";
+
+  server.sendHeader("Cache-Control", "no-store");
+  server.send(200, "application/json", json);
+}
+
+// Setup
+void setup() {
+  Serial.begin(115200);
+  delay(300);
+
+  Serial.println();
+  Serial.println("MARVEL Task 7 - Health Vitals Dashboard");
+
+  // Start I2C communication
+  Wire.begin(I2C_SDA, I2C_SCL);
+
+  // Initialize MAX30100
+  Serial.println("Initializing MAX30100...");
+
+  sensorReady = pox.begin();
+
+  if (sensorReady) {
+    // LED current may need adjustment for your sensor module
+    pox.setIRLedCurrent(MAX30100_LED_CURR_14_2MA);
+    pox.setOnBeatDetectedCallback(onBeatDetected);
+
+    Serial.println("MAX30100 initialized successfully.");
+  } else {
+    Serial.println("ERROR: MAX30100 initialization failed.");
+    Serial.println("Check VCC, GND, SDA/SCL, and the installed library.");
+  }
+
+  // Connect to Wi-Fi
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+
+  Serial.print("Connecting to Wi-Fi");
+
+  unsigned long wifiStart = millis();
+
+  while (
+    WiFi.status() != WL_CONNECTED &&
+    millis() - wifiStart < 20000
+  ) {
+    delay(300);
+    Serial.print(".");
+  }
+
+  Serial.println();
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("Wi-Fi connected.");
+
+    Serial.print("ESP32 IP address: ");
+    Serial.println(WiFi.localIP());
+
+    Serial.print("Signal strength (RSSI): ");
+    Serial.println(WiFi.RSSI());
+
+  } else {
+    Serial.println("Wi-Fi connection timed out.");
+    Serial.println("Check SSID and password.");
+  }
+
+  // Configure web server routes
+  server.on("/", HTTP_GET, handleRoot);
+  server.on("/data", HTTP_GET, handleData);
+
+  // Start web server
+  server.begin();
+
+  Serial.println("Web server started.");
+  Serial.println(
+    "Connect your computer to the same Wi-Fi and open the IP above."
+  );
+}
+
+// Main loop
+void loop() {
+  // Call frequently so the sensor algorithm can update
+  if (sensorReady) {
+    pox.update();
+  }
+
+  // Read and process measurements once per second
+  unsigned long now = millis();
+
+  if (
+    sensorReady &&
+    now - lastSampleTime >= SAMPLE_INTERVAL_MS
+  ) {
+    lastSampleTime = now;
+
+    float bpm = pox.getHeartRate();
+    float spo2 = pox.getSpO2();
+
+    // Basic plausibility filters, not medical validation
+    if (bpm >= 50.0f && bpm <= 180.0f) {
+      lastValidBPM = bpm;
+      bpmValid = true;
+    }
+
+    if (spo2 >= 80.0f && spo2 <= 100.0f) {
+      lastValidSpO2 = spo2;
+      spo2Valid = true;
+    }
+
+    Serial.print("Raw BPM: ");
+    Serial.print(bpm);
+
+    Serial.print(" | Raw SpO2: ");
+    Serial.print(spo2);
+
+    Serial.print(" | Display BPM: ");
+
+    if (bpmValid) {
+      Serial.print(lastValidBPM, 1);
+    } else {
+      Serial.print("--");
+    }
+
+    Serial.print(" | Display SpO2: ");
+
+    if (spo2Valid) {
+      Serial.println(lastValidSpO2, 1);
+    } else {
+      Serial.println("--");
+    }
+  }
+
+  // Handle browser requests
+  server.handleClient();
+}
+```
