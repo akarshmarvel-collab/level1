@@ -1,0 +1,399 @@
+# MARVEL Task 4 – I2C Communication Between Two ESP32 Boards with LCD and Web Servers
+
+## 1. Connections
+
+### ESP32-A (Sender)
+
+| ESP32-A pin | Connection |
+|---|---|
+| GPIO 21 (SDA) | ESP32-B GPIO 21 (SDA) |
+| GPIO 22 (SCL) | ESP32-B GPIO 22 (SCL) |
+| GND | ESP32-B GND |
+| USB | Connect to computer for programming and Serial Monitor |
+
+### ESP32-B (Receiver + LCD)
+
+| ESP32-B pin | Connection |
+|---|---|
+| GPIO 21 (SDA) | ESP32-A GPIO 21 (SDA) |
+| GPIO 22 (SCL) | ESP32-A GPIO 22 (SCL) |
+| GPIO 25 (SDA) | LCD SDA |
+| GPIO 26 (SCL) | LCD SCL |
+| GND | Common GND with ESP32-A and LCD |
+| LCD VCC | Suitable supply for the LCD module, subject to voltage-level safety |
+
+**Important:** Use an appropriate bidirectional I²C level shifter if the LCD backpack's pull-up resistors raise SDA/SCL to 5 V. Do not connect 5 V I²C signals directly to ESP32 GPIOs.
+
+The receiver is configured with I²C address `0x55`, and the LCD address is `0x27`.
+
+## 2. Before Uploading
+
+1. Install the ESP32 board package in Arduino IDE.
+2. Use the built-in `WiFi`, `WebServer`, and `Wire` libraries.
+3. Set `WIFI_SSID` and `WIFI_PASSWORD` in both sketches to the same Wi-Fi network credentials.
+4. Upload Sketch A to ESP32-A.
+5. Upload Sketch B to ESP32-B.
+6. Open each board's Serial Monitor at **115200 baud** and note the IP addresses printed by the boards.
+7. Both boards must be connected to the same Wi-Fi network. If your network uses client isolation, the boards may not be able to communicate over HTTP.
+
+---
+
+## 3. Sketch A — ESP32-A Sender and Web Server
+
+```cpp
+#include <WiFi.h>
+#include <WebServer.h>
+#include <Wire.h>
+
+// Replace with your Wi-Fi details.
+const char* WIFI_SSID = "YOUR_WIFI_NAME";
+const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
+
+// I2C connection to ESP32-B.
+const int SDA_PIN = 21;
+const int SCL_PIN = 22;
+const uint8_t RECEIVER_ADDRESS = 0x55;
+
+WebServer server(80);
+
+String lastMessage = "";
+
+void handleRoot() {
+  String page = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MARVEL I2C Sender</title>
+</head>
+<body>
+  <h2>ESP32-A Message Sender</h2>
+  <form action="/send" method="GET">
+    <label>Enter message (maximum 32 characters):</label><br>
+    <input type="text" name="msg" maxlength="32" required>
+    <button type="submit">Send Message</button>
+  </form>
+  <p>Submit a message to transmit it to ESP32-B.</p>
+</body>
+</html>
+)rawliteral";
+
+  server.send(200, "text/html", page);
+}
+
+void handleSend() {
+  if (!server.hasArg("msg")) {
+    server.send(400, "text/plain", "Missing msg parameter");
+    return;
+  }
+
+  String message = server.arg("msg");
+  message.trim();
+
+  if (message.length() == 0 || message.length() > 32) {
+    server.send(400, "text/plain",
+                "Message must contain 1 to 32 characters.");
+    return;
+  }
+
+  // Send the message bytes to the I2C receiver.
+  Wire.beginTransmission(RECEIVER_ADDRESS);
+
+  size_t written = Wire.write(
+    (const uint8_t*)message.c_str(),
+    message.length()
+  );
+
+  uint8_t error = Wire.endTransmission();
+
+  if (written == message.length() && error == 0) {
+    lastMessage = message;
+
+    Serial.print("Message sent: ");
+    Serial.println(message);
+
+    server.send(
+      200,
+      "text/html",
+      "<h3>Message sent successfully.</h3>"
+      "<p>Message: " + message + "</p>"
+      "<a href='/'>Send another message</a>"
+    );
+  } else {
+    Serial.print("I2C transmission failed. Error: ");
+    Serial.println(error);
+
+    server.send(
+      500,
+      "text/plain",
+      "I2C transmission failed. Check wiring and receiver power."
+    );
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  // Initialize ESP32-A as the I2C master.
+  Wire.begin(SDA_PIN, SCL_PIN, 100000);
+
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+
+  Serial.print("Connecting to Wi-Fi");
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println();
+  Serial.println("Wi-Fi connected.");
+  Serial.print("Sender IP address: ");
+  Serial.println(WiFi.localIP());
+
+  server.on("/", HTTP_GET, handleRoot);
+  server.on("/send", HTTP_GET, handleSend);
+
+  server.begin();
+  Serial.println("Sender web server started.");
+}
+
+void loop() {
+  server.handleClient();
+}
+```
+
+---
+
+## 4. Sketch B — ESP32-B Receiver, LCD and Web Server
+
+```cpp
+#include <WiFi.h>
+#include <WebServer.h>
+#include <Wire.h>
+
+// Replace with the same Wi-Fi details used in Sketch A.
+const char* WIFI_SSID = "YOUR_WIFI_NAME";
+const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
+
+// I2C slave bus connected to ESP32-A.
+const int BUS_SDA = 21;
+const int BUS_SCL = 22;
+const uint8_t SLAVE_ADDRESS = 0x55;
+
+// Separate I2C bus for the LCD.
+const int LCD_SDA = 25;
+const int LCD_SCL = 26;
+const uint8_t LCD_ADDRESS = 0x27;
+
+WebServer server(80);
+
+// Shared message buffer updated by the I2C receive callback.
+volatile char incomingMessage[33] = {0};
+volatile uint8_t incomingLength = 0;
+volatile bool messageAvailable = false;
+
+String lastMessage = "Waiting for a message";
+
+// Common PCF8574 backpack mapping:
+// P0 = RS, P1 = RW, P2 = EN, P3 = Backlight,
+// P4-P7 = LCD D4-D7.
+const uint8_t LCD_RS = 0x01;
+const uint8_t LCD_EN = 0x04;
+const uint8_t LCD_BL = 0x08;
+
+// ---------- Low-level LCD driver ----------
+
+void lcdExpanderWrite(uint8_t data) {
+  Wire1.beginTransmission(LCD_ADDRESS);
+  Wire1.write(data | LCD_BL);
+  Wire1.endTransmission();
+}
+
+void lcdPulseEnable(uint8_t data) {
+  lcdExpanderWrite(data | LCD_EN);
+  delayMicroseconds(1);
+  lcdExpanderWrite(data & ~LCD_EN);
+  delayMicroseconds(50);
+}
+
+void lcdWrite4Bits(uint8_t value) {
+  lcdExpanderWrite(value);
+  lcdPulseEnable(value);
+}
+
+void lcdSend(uint8_t value, bool isData) {
+  uint8_t control = isData ? LCD_RS : 0;
+
+  lcdWrite4Bits((value & 0xF0) | control);
+  lcdWrite4Bits(((value << 4) & 0xF0) | control);
+}
+
+void lcdCommand(uint8_t command) {
+  lcdSend(command, false);
+}
+
+void lcdData(uint8_t data) {
+  lcdSend(data, true);
+}
+
+void lcdInit() {
+  delay(50);
+
+  // Initialize the HD44780 LCD in 4-bit mode.
+  lcdWrite4Bits(0x30);
+  delay(5);
+  lcdWrite4Bits(0x30);
+  delayMicroseconds(150);
+  lcdWrite4Bits(0x30);
+  lcdWrite4Bits(0x20);
+
+  lcdCommand(0x28);  // 4-bit, 2-line, 5x8 font
+  lcdCommand(0x08);  // Display off
+  lcdCommand(0x01);  // Clear display
+  delay(2);
+  lcdCommand(0x06);  // Increment cursor
+  lcdCommand(0x0C);  // Display on, cursor off
+}
+
+void lcdSetCursor(uint8_t column, uint8_t row) {
+  const uint8_t rowOffsets[] = {0x00, 0x40};
+  lcdCommand(0x80 | (column + rowOffsets[row]));
+}
+
+void lcdPrint(const char* text) {
+  while (*text) {
+    lcdData((uint8_t)*text++);
+  }
+}
+
+void showMessageOnLCD(const String& message) {
+  lcdCommand(0x01);
+  delay(2);
+
+  lcdSetCursor(0, 0);
+  for (int i = 0; i < 16 && i < message.length(); i++) {
+    lcdData(message[i]);
+  }
+
+  lcdSetCursor(0, 1);
+  for (int i = 16; i < 32 && i < message.length(); i++) {
+    lcdData(message[i]);
+  }
+}
+
+// ---------- I2C receive callback ----------
+
+void receiveEvent(int count) {
+  uint8_t index = 0;
+
+  while (Wire.available()) {
+    char value = (char)Wire.read();
+
+    if (index < 32) {
+      incomingMessage[index++] = value;
+    }
+  }
+
+  incomingMessage[index] = '\0';
+  incomingLength = index;
+  messageAvailable = true;
+}
+
+// ---------- Receiver web server ----------
+
+void handleRoot() {
+  String page = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="refresh" content="3">
+  <title>MARVEL I2C Receiver</title>
+</head>
+<body>
+  <h2>ESP32-B Receiver</h2>
+  <p>Latest received message:</p>
+)rawliteral";
+
+  page += "<h3>";
+  page += lastMessage;
+  page += "</h3>";
+  page += "<p>Refreshes every 3 seconds.</p>";
+  page += "</body></html>";
+
+  server.send(200, "text/html", page);
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  // Start the LCD on the second I2C controller.
+  Wire1.begin(LCD_SDA, LCD_SCL, 100000);
+  lcdInit();
+  showMessageOnLCD("Waiting for message");
+
+  // Start ESP32-B as the I2C slave.
+  Wire.begin(SLAVE_ADDRESS, BUS_SDA, BUS_SCL, 100000);
+  Wire.onReceive(receiveEvent);
+
+  Serial.println("I2C receiver ready at address 0x55.");
+
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+
+  Serial.print("Connecting to Wi-Fi");
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println();
+  Serial.println("Wi-Fi connected.");
+  Serial.print("Receiver IP address: ");
+  Serial.println(WiFi.localIP());
+
+  server.on("/", HTTP_GET, handleRoot);
+  server.begin();
+
+  Serial.println("Receiver web server started.");
+}
+
+void loop() {
+  server.handleClient();
+
+  if (messageAvailable) {
+    char localMessage[33];
+
+    // Copy the received data before using it in the main loop.
+    noInterrupts();
+
+    uint8_t length = incomingLength;
+
+    if (length > 32) {
+      length = 32;
+    }
+
+    for (uint8_t i = 0; i < length; i++) {
+      localMessage[i] = incomingMessage[i];
+    }
+
+    localMessage[length] = '\0';
+    messageAvailable = false;
+
+    interrupts();
+
+    lastMessage = String(localMessage);
+
+    Serial.print("Received message: ");
+    Serial.println(lastMessage);
+
+    showMessageOnLCD(localMessage);
+  }
+}
+```
+
+---
+
