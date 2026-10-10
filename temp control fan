@@ -1,0 +1,123 @@
+# Task 2 – Temperature-Based Fan Control
+
+## Circuit Connections
+
+### DHT11 to ESP32
+
+| DHT11 Pin | ESP32 Pin |
+|---|---|
+| VCC | 3.3V |
+| DATA | GPIO 4 |
+| GND | GND |
+
+### L298N to ESP32
+
+| L298N Pin | ESP32 Pin |
+|---|---|
+| ENA | GPIO 25 (PWM) |
+| IN1 | GPIO 26 |
+| IN2 | GPIO 27 |
+| GND | ESP32 GND |
+
+### DC Motor to L298N
+
+| DC Motor Wire | L298N Pin |
+|---|---|
+| Wire 1 | OUT1 |
+| Wire 2 | OUT2 |
+
+### VRPS to L298N
+
+| VRPS Terminal | L298N Pin |
+|---|---|
+| Positive (+) | Motor supply input (`+12V` or `VS`) |
+| Negative (-) | GND |
+
+Connect ESP32 GND, L298N GND, and VRPS negative together. Power the ESP32 through USB. Remove the ENA jumper when using GPIO 25 for PWM control. Set the VRPS to the motor's rated voltage.
+
+## Source Code
+
+```cpp
+#include <DHT.h>
+
+// DHT11 sensor configuration
+#define DHTPIN 4
+#define DHTTYPE DHT11
+
+// L298N motor driver pins
+#define ENA 25
+#define IN1 26
+#define IN2 27
+
+DHT dht(DHTPIN, DHTTYPE);
+
+// Fan settings
+const float thresholdTemp = 30.0;
+const int pwmFrequency = 5000;
+const int pwmResolution = 8;
+const int fanSpeed = 255;
+
+void fanOff() {
+  ledcWrite(ENA, 0);
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, LOW);
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(ENA, OUTPUT);
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
+
+  digitalWrite(ENA, LOW);
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, LOW);
+
+  // Initialize PWM for ESP32 Arduino Core 3.x
+  if (!ledcAttach(ENA, pwmFrequency, pwmResolution)) {
+    Serial.println("PWM initialization failed!");
+
+    while (true) {
+      fanOff();
+      delay(1000);
+    }
+  }
+
+  dht.begin();
+
+  Serial.println("Temperature-Based Fan Control");
+  Serial.println("System initialized");
+}
+
+void loop() {
+  float temperature = dht.readTemperature();
+
+  if (isnan(temperature)) {
+    Serial.println("DHT11 reading failed!");
+    fanOff();
+    Serial.println("Fan OFF - Sensor Error");
+    delay(2000);
+    return;
+  }
+
+  Serial.print("Temperature: ");
+  Serial.print(temperature);
+  Serial.println(" C");
+
+  if (temperature >= thresholdTemp) {
+    digitalWrite(IN1, HIGH);
+    digitalWrite(IN2, LOW);
+    ledcWrite(ENA, fanSpeed);
+
+    Serial.println("Fan Status: ON");
+  } else {
+    fanOff();
+    Serial.println("Fan Status: OFF");
+  }
+
+  Serial.println("------------------------------");
+  delay(2000);
+}
+```
+
